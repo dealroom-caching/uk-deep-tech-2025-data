@@ -2,57 +2,119 @@ import fs from 'fs';
 import path from 'path';
 
 // Note: Using built-in fetch API available in Node.js 18+
-// Google Sheets configuration
-const SHEET_ID = "1LutC2VxesrS-5Ym8VydVvgLh8stH66vY_Bor1g7lY2A";
+// Google Sheets configuration - Same spreadsheet, different GIDs for locations and sectors
+const SPREADSHEET_ID = "1peZPgji4R4-KO4EuuvHGJRWTfHZmuBc9WPVRmn_ldrw";
 
-// Fetch sheets by GID (more reliable than names)
-const SHEET_CONFIGS = [
-  { name: "overview", gid: "109336614" },
-  { name: "yearly", gid: "1515439227" },
-  { name: "quarterly", gid: "966294539" },
-  { name: "enterpriseValue", gid: "350477002" },
-  { name: "regional", gid: "840041598" }
-];
+// Locations dataset configuration
+const LOCATIONS_CONFIG = {
+  overviewGid: '1304110900',
+  yearlyGid: '0',
+  quarterlyGid: '0',
+  regionalGid: '0',
+  evTimeseriesGid: '1009631018',
+  vcTimeseriesGid: '1452246798',
+  deepTechShareGid: '2142869021'
+};
 
-async function fetchGoogleSheetData(sheetConfig) {
+// Sectors dataset configuration
+const SECTORS_CONFIG = {
+  overviewGid: '1065279143',
+  yearlyGid: '0',
+  quarterlyGid: '0',
+  regionalGid: '0',
+  evTimeseriesGid: '1754921105',
+  vcTimeseriesGid: '879771746',
+  deepTechShareGid: '1539405594'
+};
+
+// Build Google Sheets URL
+function buildSheetUrl(gid) {
   const timestamp = Date.now();
-  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${sheetConfig.gid}&headers=1&timestamp=${timestamp}`;
+  return `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:json&gid=${gid}&timestamp=${timestamp}`;
+}
+
+// Parse Google Sheets JSONP response
+function parseGoogleSheetsResponse(text) {
+  // Extract JSON from JSONP wrapper: google.visualization.Query.setResponse({...});
+  const jsonMatch = text.match(/google\.visualization\.Query\.setResponse\((.*)\);?$/s);
+  if (!jsonMatch) {
+    throw new Error('Invalid response format from Google Sheets');
+  }
+  return JSON.parse(jsonMatch[1]);
+}
+
+// Fetch and parse a single sheet
+async function fetchSheet(gid, name) {
+  if (gid === '0') {
+    console.log(`⏭️  Skipping ${name} (GID: 0 - placeholder)`);
+    return { headers: [], rows: [] };
+  }
+
+  console.log(`Fetching ${name} (GID: ${gid})...`);
   
-  console.log(`Fetching ${sheetConfig.name} (GID: ${sheetConfig.gid})...`);
-  
-  const response = await fetch(url);
+  const response = await fetch(buildSheetUrl(gid));
   if (!response.ok) {
-    throw new Error(`Failed to fetch ${sheetConfig.name}: ${response.statusText}`);
+    throw new Error(`Failed to fetch ${name}: ${response.statusText}`);
   }
   
   const text = await response.text();
+  const jsonData = parseGoogleSheetsResponse(text);
   
-  // Parse Google Sheets JSONP response
-  const jsonStartIndex = text.indexOf('(') + 1;
-  const jsonEndIndex = text.lastIndexOf('}') + 1;
-  const jsonText = text.substring(jsonStartIndex, jsonEndIndex);
-  const data = JSON.parse(jsonText);
-  
-  if (!data.table || !data.table.rows) {
-    throw new Error(`No data found in ${sheetConfig.name}`);
+  if (!jsonData.table || !jsonData.table.rows) {
+    console.log(`⚠️  No data found in ${name}`);
+    return { headers: [], rows: [] };
   }
   
-  // Convert to our format
-  const headers = data.table.cols?.map(col => col.label || '') || [];
-  const rows = data.table.rows.map(row => 
-    row.c?.map(cell => cell?.v || '') || []
+  // Convert to headers/rows format
+  const headers = jsonData.table.cols?.map(col => col.label || '') || [];
+  const rows = jsonData.table.rows.map(row => 
+    row.c?.map(cell => {
+      const value = cell?.v;
+      // Return value as-is (null becomes null, not empty string)
+      return value !== undefined ? value : null;
+    }) || []
   );
   
-  return {
-    headers,
-    rows,
-    weightedColumns: Array(headers.length).fill(false) // Remove weights-specific logic since we have different sheets now
-  };
+  console.log(`✅ ${name}: ${rows.length} rows, ${headers.length} columns`);
+  
+  return { headers, rows };
+}
+
+// Fetch all 7 data types for a dataset (locations or sectors)
+async function fetchDataset(config, datasetName) {
+  console.log(`\n📊 Fetching ${datasetName} dataset...`);
+  
+  try {
+    // Fetch all 7 data types in parallel
+    const [overview, yearly, quarterly, regional, evTimeseries, vcTimeseries, deepTechShare] = await Promise.all([
+      fetchSheet(config.overviewGid, `${datasetName}/overview`),
+      fetchSheet(config.yearlyGid, `${datasetName}/yearly`),
+      fetchSheet(config.quarterlyGid, `${datasetName}/quarterly`),
+      fetchSheet(config.regionalGid, `${datasetName}/regional`),
+      fetchSheet(config.evTimeseriesGid, `${datasetName}/evTimeseries`),
+      fetchSheet(config.vcTimeseriesGid, `${datasetName}/vcTimeseries`),
+      fetchSheet(config.deepTechShareGid, `${datasetName}/deepTechShare`)
+    ]);
+
+    return {
+      overview,
+      yearly,
+      quarterly,
+      regional,
+      evTimeseries,
+      vcTimeseries,
+      deepTechShare
+    };
+  } catch (error) {
+    console.error(`❌ Failed to fetch ${datasetName}:`, error.message);
+    throw error;
+  }
 }
 
 async function main() {
   try {
     console.log('🔄 Fetching fresh Google Sheets data...');
+    console.log(`📋 Spreadsheet ID: ${SPREADSHEET_ID}`);
     
     // Create cache directory
     const cacheDir = path.join(process.cwd(), 'public', 'cached-data');
@@ -60,35 +122,30 @@ async function main() {
       fs.mkdirSync(cacheDir, { recursive: true });
     }
     
-    // Fetch all sheets using GIDs
-    const allData = {};
-    for (const sheetConfig of SHEET_CONFIGS) {
-      try {
-        allData[sheetConfig.name] = await fetchGoogleSheetData(sheetConfig);
-        console.log(`✅ ${sheetConfig.name}: ${allData[sheetConfig.name].rows.length} rows`);
-      } catch (error) {
-        console.error(`❌ Failed to fetch ${sheetConfig.name}:`, error.message);
-        // Continue with other sheets instead of failing completely
-        console.log(`⚠️ Skipping ${sheetConfig.name} and continuing...`);
-      }
-    }
+    // Fetch both datasets in parallel (14 total requests)
+    const [locations, sectors] = await Promise.all([
+      fetchDataset(LOCATIONS_CONFIG, 'locations'),
+      fetchDataset(SECTORS_CONFIG, 'sectors')
+    ]);
     
-    // Save to cache file with timestamp (React app expects this format)
+    // Build cache structure matching the expected format
     const cacheData = {
       timestamp: new Date().toISOString(),
       lastUpdated: new Date().toISOString(),
-      data: allData
+      locations,
+      sectors
     };
     
-    // Save as sectors-cache.json (with timestamp structure)
+    // Save to cache file
     const cacheFile = path.join(cacheDir, 'sectors-cache.json');
-    
     fs.writeFileSync(cacheFile, JSON.stringify(cacheData, null, 2));
     
-    console.log(`✅ Cache updated successfully!`);
+    console.log('\n✅ Cache updated successfully!');
     console.log(`📁 Cache file: ${cacheFile}`);
-    console.log(`📊 Total sheets cached: ${Object.keys(allData).length}`);
     console.log(`🕒 Timestamp: ${cacheData.timestamp}`);
+    console.log('\n📊 Summary:');
+    console.log(`   Locations - Overview: ${locations.overview.rows.length} rows`);
+    console.log(`   Sectors - Overview: ${sectors.overview.rows.length} rows`);
     
   } catch (error) {
     console.error('❌ Cache update failed:', error);
